@@ -1,0 +1,729 @@
+import discord
+# from discord.ext import tasks, commands
+import asyncio
+import aiohttp
+import requests
+import json
+import datetime as dt
+# import time
+import pandas as pd
+import os
+# from get_metadata import run
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib
+matplotlib.rcParams['timezone'] = 'US/Eastern'
+import pickle
+import aiofiles
+from get_stats import get_stats
+
+
+def get_image_urls(collection, metadata):
+    image_urls = {}
+
+    for token_id, m in metadata.items():
+
+        uri = m['image']
+
+        if 'http' not in uri:
+            image_url = 'https://ipfs.io/ipfs/' + uri.split('//')[1]
+            image_urls[token_id] = image_url
+        else:
+            image_urls[token_id] = uri
+
+    write_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt', image_urls)
+    os.makedirs(f'{os.path.join(os.getcwd())}\\images\\{collection}', exist_ok=True)
+
+
+def write_json(path, data):
+    with open(f'{path}', 'w') as outfile:
+        json.dump(data, outfile)
+
+
+def read_json(path):
+    with open(path) as json_file:
+        data = json.load(json_file)
+    return data
+
+
+client = discord.Client()
+contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+slugs = read_json(f'{os.path.join(os.getcwd())}/slugs.txt')
+
+def pkl(obj, path):
+    with open(path, 'wb') as handle:
+        pickle.dump(obj, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def unpkl(path):
+    with open(path, 'rb') as handle:
+        obj = pickle.load(handle)
+    return obj
+
+
+def sales_scatter(collection, min_px=None, max_px=None, reset=0):
+    if reset == 0:
+        try:
+            cache = unpkl(path=f"C:/dev/sheets/{collection}_cache.pickle")
+        except:
+            cache = {}
+    else:
+        cache = {}
+
+    if collection not in cache.keys():
+        responses = []
+        sales = []
+        times = []
+
+        limit = 50
+        for i in range(10):
+            offset = i * limit
+            url = f"https://api.opensea.io/api/v1/events?asset_contract_address={contract_addrs[collection]}&event_type=successful&offset={offset}&limit={limit}"
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    responses.append(response.json())
+            except:
+                pass
+
+        for response in responses:
+            for evt in response['asset_events']:
+                px = float(evt['total_price']) / 1000000000000000000
+                time = dt.datetime.strptime(evt['created_date'], '%Y-%m-%dT%H:%M:%S.%f')
+                sales.append(px)
+                times.append(time)
+
+        df = pd.DataFrame({'times': times, 'sales': sales}).sort_values('times').drop_duplicates()
+        print(df.times.max())
+
+        if max_px != None:
+            df = df.loc[(df.sales <= max_px)]
+        if min_px != None:
+            df = df.loc[(df.sales >= min_px)]
+
+        df['MA'] = df.rolling(50).mean()
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.scatter(df.times, df.sales, c='w')
+        ax.grid()
+        ax.plot(df.times, df.MA, c='w')
+
+        if df.times.dt.date.nunique() <= 2:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%I:%M%p'))
+            ax.xaxis.set_minor_formatter(mdates.DateFormatter('%I:%M%p'))
+        else:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+            ax.xaxis.set_minor_formatter(mdates.DateFormatter('%m-%d'))
+
+        ax.title.set_text(f'{collection}')
+        ax.set_facecolor('k')
+
+        cache[collection] = {'sales': sales, 'times': times}
+
+        plt.savefig(f'C:/dev/sheets/{collection}_sales_scatter.jpeg')
+
+        pkl(cache, path=f"C:/dev/sheets/{collection}_cache.pickle")
+        plt.close('all')
+
+    else:
+        sales = cache[collection]['sales']
+        times = cache[collection]['times']
+        responses = []
+
+        time = 0
+        counter = 0
+        while time not in times:
+            limit = 20
+            offset = counter * limit
+            url = f"https://api.opensea.io/api/v1/events?asset_contract_address={contract_addrs[collection]}&event_type=successful&offset={offset}&limit={limit}"
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    responses.append(response.json())
+            except:
+                pass
+
+            for response in responses:
+                for evt in response['asset_events']:
+                    px = float(evt['total_price']) / 1000000000000000000
+                    time = dt.datetime.strptime(evt['created_date'], '%Y-%m-%dT%H:%M:%S.%f')
+                    sales.append(px)
+                    times.append(time)
+            counter += 1
+
+        df = pd.DataFrame({'times': times, 'sales': sales}).sort_values('times').drop_duplicates()
+        print(df.times.max())
+
+        if max_px != None:
+            df = df.loc[(df.sales <= max_px)]
+        if min_px != None:
+            df = df.loc[(df.sales >= min_px)]
+
+        df['MA'] = df.rolling(50).mean()
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.scatter(df.times, df.sales, c='w')
+        ax.grid()
+        ax.plot(df.times, df.MA, c='w')
+
+        if df.times.dt.date.nunique() <= 2:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%I:%M%p'))
+            ax.xaxis.set_minor_formatter(mdates.DateFormatter('%I:%M%p'))
+        else:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+            ax.xaxis.set_minor_formatter(mdates.DateFormatter('%m-%d'))
+
+        ax.title.set_text(f'{collection}')
+        ax.set_facecolor('k')
+
+        cache[collection] = {'sales': sales, 'times': times}
+
+        plt.savefig(f'C:/dev/sheets/{collection}_sales_scatter.jpeg')
+
+        pkl(cache, path=f"C:/dev/sheets/{collection}_cache.pickle")
+        plt.close('all')
+
+
+
+
+@client.event
+async def on_ready():
+    print('We have logged in as {0.user}'.format(client))
+
+
+list_running = False
+evt_ids = []
+
+
+@client.event
+async def on_message(message):
+    global list_running
+    global evt_ids
+    global contract_addrs
+
+
+    if message.author == client.user:
+        return
+
+
+    if message.content.startswith('$list'):
+        contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+
+        if collection in contract_addrs.keys():
+            try:
+                json_data = read_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt')
+                metadata_dct = json.loads(json_data)
+                config = pd.read_csv(f'{os.path.join(os.getcwd())}/config/{collection}.csv')
+                tracked = config.loc[config.track == 1]
+                tracked_set = set([f'{tp}:{atr}' for tp, atr in zip(tracked['type'], tracked['attr'])])
+                list_running = True
+                await message.channel.send(f'listing **{collection}**...{",".join(tracked_set)[:1900]}')
+
+                os.makedirs(f'{os.path.join(os.getcwd())}\\images\\{collection}', exist_ok=True)
+
+                if os.path.isfile(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt'):
+                    pass
+                else:
+                    metadata = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata/{collection}.txt'))
+                    image_urls = get_image_urls(collection, metadata)
+
+                try:
+                    max_px = float(msg_lst[2])
+                except Exception as e:
+                    max_px = 10000
+
+            except Exception as e:
+                print(e)
+                await message.channel.send(f'{collection} metadata is missing, list ended')
+        else:
+            await message.channel.send(f'{collection} does not exist, list ended')
+
+        while list_running:
+            print(f'list_running: {list_running}')
+
+            occurred_after = (dt.datetime.now() - dt.timedelta(minutes=1)).timestamp()
+            url = f"https://api.opensea.io/api/v1/events?asset_contract_address={contract_addrs[collection]}&event_type=created&offset=0&occurred_after={occurred_after}"
+            events_raw = []
+            async with aiohttp.ClientSession() as session:
+                response = await asyncio.create_task(session.get(url, ssl=False))
+                events_raw.append(await response.json())
+
+            events_data = []
+            token_ids = []
+            uris = []
+            matched_traits = []
+
+            for evt in events_raw[0]['asset_events']:
+                try:
+                    token_id = evt['asset']['token_id']
+                    metadata_lst = []
+                    for k, data_dct in {k: v for k, v in metadata_dct.items() if k == token_id}.items():
+                        for tp, atr in data_dct.items():
+                            data = f'{tp}:{atr}'
+                            if data not in metadata_lst:
+                                metadata_lst.append(data)
+                    evt_set = set(metadata_lst)
+                    match = tracked_set.intersection(evt_set)
+                except Exception as e:
+                    print(evt, e)
+                    pass
+
+                if len(match) > 0:
+                    matched_traits.extend(list(match))
+                    px = float(evt['starting_price']) / 1000000000000000000
+                    if px <= max_px:
+                        try:
+                            time = dt.datetime.strptime(evt['created_date'], '%Y-%m-%dT%H:%M:%S.%f')
+                            timeEDT = time.replace(tzinfo=dt.timezone.utc).astimezone(tz=None).strftime('%I:%M%p')
+                            events_data.append([timeEDT, evt['asset']['asset_contract']['name'], evt['asset']['token_id'], px,
+                                                evt['asset']['permalink']])
+                            token_ids.append(evt['asset']['token_id'])
+                            uris.append(evt['asset']['token_metadata'])
+                        except Exception as e:
+                            print(evt, e)
+                            pass
+
+            metadata_raw = []
+
+            for tkid, uri in zip(token_ids, uris):
+                if tkid in metadata_dct.keys():
+                    metadata_raw.append(metadata_dct[tkid])
+                    print('using internal metadata')
+
+                else:
+                    try:
+                        print('attempting to fetch metadata')
+                        if 'http' not in uri:
+                            url = 'https://ipfs.io/ipfs/' + uri.split('//')[1]
+                        else:
+                            url = uri
+                        response = requests.get(url)
+                        m = response.json()
+
+                        m_dct = {}
+                        for trait in m['attributes']:
+                            m_dct[trait['trait_type']] = trait['value']
+                        metadata_raw.append(m_dct)
+
+                    except Exception as e:
+                        pass
+
+            for idx, m in enumerate(metadata_raw):
+                try:
+                    traits_list = []
+                    for k, v in m.items():
+                        if f'{k}:{v}' in matched_traits:
+                            traits_list.append("**" + str(k) + "**" + ':' + "**" + str(v) + "**")
+                        else:
+                            traits_list.append(str(k) + ':' + str(v))
+                    trait_str = ' | '.join(traits_list)
+                    events_data[idx].append(trait_str)
+                except Exception as e:
+                    print(e)
+                    pass
+
+            for evt in sorted(events_data, key=lambda x: x[0], reverse=False):
+                token_id = evt[2]
+
+                try:
+                    evtstr = f"**LIST**: {evt[0]}: {evt[1]} | {token_id} | **{evt[3]}e** |\n{evt[5]}\n{evt[4]}"
+                except Exception as e:
+                    evtstr = f"**LIST**: {evt[0]}: {evt[1]} | {token_id} | **{evt[3]}e** |\n{evt[4]}"
+
+                evt_id = f"{evt[1]}_{evt[2]}_{evt[3]}"
+
+                if evt_id not in evt_ids:
+                    image_urls = read_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt')
+                    image_url = image_urls[token_id]
+
+                    if os.path.isfile(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'):
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                    else:
+                        async with aiohttp.ClientSession(trust_env=True) as session:
+                            async with session.get(image_url, ssl=True) as resp:
+                                if resp.status == 200:
+                                    f = await aiofiles.open(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png',
+                                                            mode='wb')
+                                    await f.write(await resp.read())
+                                    await f.close()
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                else:
+                    print('event id exists')
+
+            await asyncio.sleep(3)
+
+
+    if message.content.startswith('$stream'):
+        contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+
+        await message.channel.send(f'$streaming {collection}...')
+
+        if collection in contract_addrs.keys():
+            list_running = True
+
+            os.makedirs(f'{os.path.join(os.getcwd())}\\images\\{collection}', exist_ok=True)
+
+            if os.path.isfile(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt'):
+                pass
+            else:
+                metadata = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata/{collection}.txt'))
+                image_urls = get_image_urls(collection, metadata)
+
+            try:
+                max_px = float(msg_lst[2])
+            except Exception as e:
+                max_px = 10000
+
+        else:
+            await message.channel.send(f'{collection} does not exist, $stream ended')
+
+        while list_running:
+            print(f'list_running: {list_running}')
+
+            occurred_after = (dt.datetime.now() - dt.timedelta(minutes=1)).timestamp()
+            url = f"https://api.opensea.io/api/v1/events?asset_contract_address={contract_addrs[collection]}&event_type=created&offset=0&occurred_after={occurred_after}"
+            events_raw = []
+            async with aiohttp.ClientSession() as session:
+                response = await asyncio.create_task(session.get(url, ssl=False))
+                events_raw.append(await response.json())
+
+            events_data = []
+            token_ids = []
+            uris = []
+
+            for evt in events_raw[0]['asset_events']:
+                px = float(evt['starting_price']) / 1000000000000000000
+                if px <= max_px:
+                    try:
+                        time = dt.datetime.strptime(evt['created_date'], '%Y-%m-%dT%H:%M:%S.%f')
+                        timeEDT = time.replace(tzinfo=dt.timezone.utc).astimezone(tz=None).strftime('%I:%M%p')
+                        events_data.append([timeEDT, evt['asset']['asset_contract']['name'], evt['asset']['token_id'], px,
+                                            evt['asset']['permalink']])
+                        token_ids.append(evt['asset']['token_id'])
+                        uris.append(evt['asset']['token_metadata'])
+                    except Exception as e:
+                        print(evt, e)
+                        pass
+
+            try:
+                json_data = read_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt')
+                metadata_dct = json.loads(json_data)
+                print('using internal metadata')
+
+                for idx, token_id in enumerate(token_ids):
+                    mdata = metadata_dct[token_id]
+                    traits_list = []
+                    for typ, atr in mdata.items():
+                        traits_list.append(str(typ) + ':' + str(atr))
+                    trait_str = ' | '.join(traits_list)
+                    events_data[idx].append(trait_str)
+
+            except Exception as e:
+                metadata_raw = []
+
+                for tkid, uri in zip(token_ids, uris):
+                    try:
+                        print('attempting to fetch metadata')
+                        if 'http' not in uri:
+                            url = 'https://ipfs.io/ipfs/' + uri.split('//')[1]
+                        else:
+                            url = uri
+                        response = requests.get(url)
+                        m = response.json()
+
+                        m_dct = {}
+                        for trait in m['attributes']:
+                            m_dct[trait['trait_type']] = trait['value']
+                        metadata_raw.append(m_dct)
+
+                    except Exception as e:
+                        pass
+
+                for idx, m in enumerate(metadata_raw):
+                    try:
+                        traits_list = []
+                        for k, v in m.items():
+                            traits_list.append(str(k) + ':' + str(v))
+                        trait_str = ' | '.join(traits_list)
+                        events_data[idx].append(trait_str)
+                    except Exception as e:
+                        print(e)
+                        pass
+
+            for evt in sorted(events_data, key=lambda x: x[0], reverse=False):
+                token_id = evt[2]
+
+                try:
+                    evtstr = f"**LIST**: {evt[0]}: {evt[1]} | {token_id} | **{evt[3]}e** |\n{evt[5]}\n{evt[4]}"
+                except Exception as e:
+                    evtstr = f"**LIST**: {evt[0]}: {evt[1]} | {token_id} | **{evt[3]}e** |\n{evt[4]}"
+
+                evt_id = f"{evt[1]}_{evt[2]}_{evt[3]}"
+
+                if evt_id not in evt_ids:
+                    image_urls = read_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt')
+                    image_url = image_urls[token_id]
+
+                    if os.path.isfile(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'):
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                    else:
+                        async with aiohttp.ClientSession(trust_env=True) as session:
+                            async with session.get(image_url, ssl=True) as resp:
+                                if resp.status == 200:
+                                    f = await aiofiles.open(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png',
+                                                            mode='wb')
+                                    await f.write(await resp.read())
+                                    await f.close()
+
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                else:
+                    print('event id exists')
+
+            await asyncio.sleep(3)
+
+
+    if message.content.startswith('$sales'):
+        contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+
+        await message.channel.send(f'sales {collection}...')
+
+        if collection in contract_addrs.keys():
+            list_running = True
+
+            os.makedirs(f'{os.path.join(os.getcwd())}\\images\\{collection}', exist_ok=True)
+
+            if os.path.isfile(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt'):
+                pass
+            else:
+                metadata = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata/{collection}.txt'))
+                image_urls = get_image_urls(collection, metadata)
+
+            try:
+                max_px = float(msg_lst[2])
+            except Exception as e:
+                max_px = 10000
+
+        else:
+            await message.channel.send(f'{collection} does not exist, sales ended')
+
+        while list_running:
+            print(f'list_running: {list_running}')
+
+            occurred_after = (dt.datetime.now() - dt.timedelta(minutes=1)).timestamp()
+            url = f"https://api.opensea.io/api/v1/events?asset_contract_address={contract_addrs[collection]}&event_type=successful&offset=0&occurred_after={occurred_after}"
+            events_raw = []
+            async with aiohttp.ClientSession() as session:
+                try:
+                    response = await asyncio.create_task(session.get(url, ssl=False))
+                    events_raw.append(await response.json())
+                except Exception as e:
+                    print(f'response:{response}', f'error:{e}')
+
+            events_data = []
+            token_ids = []
+            uris = []
+
+            for evt in events_raw[0]['asset_events']:
+                px = float(evt['total_price']) / 1000000000000000000
+                if px <= max_px:
+                    try:
+                        time = dt.datetime.strptime(evt['created_date'], '%Y-%m-%dT%H:%M:%S.%f')
+                        timeEDT = time.replace(tzinfo=dt.timezone.utc).astimezone(tz=None).strftime('%I:%M%p')
+                        events_data.append([timeEDT, evt['asset']['asset_contract']['name'], evt['asset']['token_id'], px,
+                                            evt['asset']['permalink']])
+                        token_ids.append(evt['asset']['token_id'])
+                        uris.append(evt['asset']['token_metadata'])
+                    except Exception as e:
+                        print(evt, e)
+                        pass
+
+            try:
+                json_data = read_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt')
+                metadata_dct = json.loads(json_data)
+                print('using internal metadata')
+
+                for idx, token_id in enumerate(token_ids):
+                    mdata = metadata_dct[token_id]
+                    traits_list = []
+                    for typ, atr in mdata.items():
+                        traits_list.append(str(typ) + ':' + str(atr))
+                    trait_str = ' | '.join(traits_list)
+                    events_data[idx].append(trait_str)
+
+            except Exception as e:
+                metadata_raw = []
+
+                for tkid, uri in zip(token_ids, uris):
+                    try:
+                        print('attempting to fetch metadata')
+                        if 'http' not in uri:
+                            url = 'https://ipfs.io/ipfs/' + uri.split('//')[1]
+                        else:
+                            url = uri
+                        response = requests.get(url)
+                        m = response.json()
+
+                        m_dct = {}
+                        for trait in m['attributes']:
+                            m_dct[trait['trait_type']] = trait['value']
+                        metadata_raw.append(m_dct)
+
+                    except Exception as e:
+                        pass
+
+                for idx, m in enumerate(metadata_raw):
+                    try:
+                        traits_list = []
+                        for k, v in m.items():
+                            traits_list.append(str(k) + ':' + str(v))
+                        trait_str = ' | '.join(traits_list)
+                        events_data[idx].append(trait_str)
+                    except Exception as e:
+                        print(e)
+                        pass
+
+            for evt in sorted(events_data, key=lambda x: x[0], reverse=False):
+                token_id = evt[2]
+
+                try:
+                    evtstr = f"**SOLD**: {evt[0]}: {evt[1]} | {evt[2]} | **{evt[3]}e** |\n{evt[5]}\n{evt[4]}"
+                except Exception as e:
+                    evtstr = f"**SOLD**: {evt[0]}: {evt[1]} | {evt[2]} | **{evt[3]}e** |\n{evt[4]}"
+
+                evt_id = f"{evt[1]}_{evt[2]}_{evt[3]}"
+
+                if evt_id not in evt_ids:
+                    image_urls = read_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt')
+                    image_url = image_urls[token_id]
+
+                    if os.path.isfile(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'):
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                    else:
+                        async with aiohttp.ClientSession(trust_env=True) as session:
+                            async with session.get(image_url, ssl=True) as resp:
+                                if resp.status == 200:
+                                    f = await aiofiles.open(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png',
+                                                            mode='wb')
+                                    await f.write(await resp.read())
+                                    await f.close()
+
+                        await message.channel.send(evtstr)
+                        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/{token_id}.png'))
+                        evt_ids.append(evt_id)
+
+                else:
+                    print('event id exists')
+
+            await asyncio.sleep(3)
+
+
+    if message.content.startswith('$stop'):
+        list_running = False
+        evt_ids = []
+        print(f'list_running: {list_running}')
+        await message.channel.send(f'list ended')
+
+
+    if message.content.startswith('$add'):
+        msg_lst = message.content.split('$add ')[1].split(':')
+        if msg_lst[0] not in contract_addrs.keys() and msg_lst[1] not in contract_addrs.values():
+            contract_addrs[msg_lst[0]] = msg_lst[1]
+            write_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt', contract_addrs)
+            await message.channel.send(f'{msg_lst[0]} saved')
+        else:
+            await message.channel.send(f'{msg_lst[0]} or {msg_lst[1]} already exists')
+
+
+    if message.content.startswith('$keys'):
+        await message.channel.send(f'{contract_addrs.keys()}')
+
+
+    if message.content.startswith('$plot'):
+        contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+        if collection in contract_addrs.keys():
+            await message.channel.send(f'plotting {collection}...')
+            if len(msg_lst) >= 3:
+                min_px = float(msg_lst[2])
+            else:
+                min_px = None
+            if len(msg_lst) >= 4:
+                max_px = float(msg_lst[3])
+            else:
+                max_px = None
+            if len(msg_lst) >= 5:
+                reset = float(msg_lst[3])
+            else:
+                reset = 0
+            sales_scatter(collection, min_px=min_px, max_px=max_px, reset=reset)
+            await message.channel.send(file=discord.File(f'C:/dev/sheets/{collection}_sales_scatter.jpeg'))
+        else:
+            await message.channel.send(f'{collection} does not exist. Try: {contract_addrs.keys()}')
+
+
+    if message.content.startswith('$image'):
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+
+        image_urls = read_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt')
+        image_url = image_urls['0']
+
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            async with session.get(image_url, ssl=True) as resp:
+                if resp.status == 200:
+                    f = await aiofiles.open(f'{os.path.join(os.getcwd())}/images/{collection}/0.png', mode='wb')
+                    await f.write(await resp.read())
+                    await f.close()
+
+        await message.channel.send(file=discord.File(f'{os.path.join(os.getcwd())}/images/{collection}/0.png'))
+
+
+
+    if message.content.startswith('$stats'):
+        msg_lst = message.content.split(' ')
+        collection = msg_lst[1]
+
+        if collection in contract_addrs.keys():
+            stats = get_stats(collection, slugs, contract_addrs)
+
+            embed = discord.Embed(title=f"__**{slugs[collection]}:**__", color=0x03f8fc,
+                                  timestamp=message.created_at)
+
+            embed.add_field(name=f'**Stats**',
+                            value=f'> Floor Price: {stats["floor_price"]}\n> '
+                                  f'One Day Sales: {stats["one_day_sales"]}\n> '
+                                  f'One Day Avg Price: {round(stats["one_day_average_price"],2)}\n> '
+                                  f'Seven Day Sales: {stats["seven_day_sales"]}\n> '
+                                  f'Seven Day Avg Price: {round(stats["seven_day_average_price"],2)}\n> '
+                                  f'Thirty Day Sales: {stats["thirty_day_sales"]}\n> '
+                                  f'Thirty Day Avg Price: {round(stats["thirty_day_average_price"],2)}\n> '
+                                  f'Total Supply: {stats["total_supply"]}',
+                            inline=False)
+
+            await message.channel.send(embed=embed)
+
+        else:
+            await message.channel.send(f'{collection} does not exist. Try: {contract_addrs.keys()}')
+
+
+client.run()
