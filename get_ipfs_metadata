@@ -1,0 +1,239 @@
+from web3 import Web3
+import json
+import pandas as pd
+import numpy as np
+import asyncio
+import aiohttp
+import time
+import requests
+import os
+from process_metadata import process_collection
+
+
+def write_json(path, data):
+    with open(f'{path}', 'w') as outfile:
+        json.dump(data, outfile)
+
+
+def read_json(path):
+    with open(path) as json_file:
+        data = json.load(json_file)
+    return data
+
+
+contract_addrs = read_json(f'{os.path.join(os.getcwd())}/contract_addresses.txt')
+abis = read_json(f'{os.path.join(os.getcwd())}/abis.txt')
+
+
+def conn_infura(address, abi):
+    infura_url = 'https://mainnet.infura.io/v3/75b3e8a1b4e14c0c9e8cac167fedd27e'
+    web3 = Web3(Web3.HTTPProvider(infura_url))
+    print('web3 connected:', web3.isConnected())
+    contract = web3.eth.contract(address=address, abi=abi)
+    return contract
+
+
+def get_token_ids(contract, n, use_index=False):
+    start = time.time()
+    if use_index:
+        token_ids = []
+        for i in range(n):
+            end = time.time()
+            if end - start >= 30:
+                print(f'{len(token_ids)} token_ids fetched')
+                start = time.time()
+            try:
+                token_ids.append(contract.functions.tokenByIndex(i).call())
+            except Exception as e:
+                print(i, e)
+                pass
+        return token_ids
+    else:
+        return [i for i in range(n)]
+
+
+def get_uris(collection, contract, n, use_index=False):
+    start = time.time()
+    uris = {}
+    urls = {}
+
+    token_ids = get_token_ids(contract=contract, n=n, use_index=use_index)
+
+    for i in token_ids:
+        end = time.time()
+        if end-start >= 30:
+            print(f'{len(uris)} URIs fetched')
+            start = time.time()
+        try:
+            uri = contract.functions.tokenURI(i).call()
+            uris[i] = uri
+            if 'http' not in uri:
+                urls[i] = 'https://ipfs.io/ipfs/' + uri.split('//')[1]
+            else:
+                urls[i] = uri
+        except Exception as e:
+            print(f'id:{i},', e)
+            pass
+
+    json_data = json.dumps(uris, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/uris/{collection}.txt', json_data)
+
+    json_data = json.dumps(urls, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/urls/{collection}.txt', json_data)
+
+    end = time.time()
+    print(f'URIs fetched in {end - start} seconds')
+    print('fetch uris completed!')
+
+    return uris, urls
+
+
+def get_metadata_tasks(session, dct):
+    tasks = []
+    for token_id, uri in dct.items():
+        tasks.append(session.get(uri, ssl=True))
+    return tasks
+
+
+async def fetch_metadata(dct):
+    global metadata
+    start = time.time()
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        tasks = get_metadata_tasks(session, dct)
+        responses = await asyncio.gather(*tasks)
+        for response in responses:
+            try:
+                metadata.append(await response.json())
+            except Exception as e:
+                print('RESPONSE', response)
+                print('ERROR', e)
+                pass
+    end = time.time()
+    print(f'metadata fetched in {end - start} seconds')
+
+
+def fetch_metadata_limited(dct, sleep_rate):
+    global metadata
+    for token_id, uri in dct.items():
+        time.sleep(sleep_rate)
+        response = requests.get(uri)
+        try:
+            metadata.append(response.json())
+        except Exception as e:
+            print(response, e)
+            pass
+
+
+def check_revealed(collection, urls, metadata):
+    failed = {}
+    revealed = {}
+
+    for tkid, m in zip(urls.keys(), metadata):
+        if 'attributes' not in m.keys():
+            failed[tkid] = m
+        else:
+            revealed[tkid] = m
+
+    json_data = json.dumps(revealed, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/metadata/{collection}.txt', json_data)  # save raw metadata
+
+    json_data = json.dumps(failed, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/failed/{collection}.txt', json_data)  # save failed token ids
+
+    return revealed, failed
+
+
+def strip_metadata(collection, revealed):
+    metadata_clean = {}
+
+    for token_id, m in revealed.items():
+        m_dct = {}
+        for trait in m['attributes']:
+            m_dct[trait['trait_type']] = trait['value']
+        metadata_clean[token_id] = m_dct
+
+    json_data = json.dumps(metadata_clean, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt', json_data)  # save clean metadata
+
+    return metadata_clean
+
+
+def attempt_fetch_failed(collection):
+    urls = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/urls/{collection}.txt'))
+    failed = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/failed/{collection}.txt'))
+    metadata_clean = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt'))
+
+    failed_urls = {key: val for key, val in urls.items() if key in failed.keys()}
+    asyncio.get_event_loop().run_until_complete(fetch_metadata(failed_urls))
+    new_failed, revealed = check_revealed(urls, metadata)
+    print(f'{len(revealed)} new metadata fetched')
+
+    while len(revealed) < len(failed):
+        new_failed_urls = {key: val for key, val in urls.items() if key in new_failed.keys()}
+        asyncio.get_event_loop().run_until_complete(fetch_metadata(new_failed_urls))
+        new_failed, new_revealed = check_revealed(urls, metadata)
+        print(f'{len(new_revealed)} new metadata fetched')
+        revealed.update(new_revealed)
+
+    new_metadata_clean = strip_metadata(revealed)
+    metadata_clean.update(new_metadata_clean)
+
+    json_data = json.dumps(metadata_clean, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/metadata_clean/{collection}.txt', json_data)  # save clean metadata
+    json_data = json.dumps(new_failed, indent=4)
+    write_json(f'{os.path.join(os.getcwd())}/json/failed/{collection}.txt', json_data)  # save updated failed
+
+    print(f'metadata cleaned: {len(metadata_clean)}, metadata failed {len(new_failed)}')
+
+    process_collection(collection)
+    print('process metadata completed!')
+
+
+def get_image_urls(collection, metadata):
+    image_urls = {}
+
+    for token_id, m in metadata.items():
+        image_url = 'https://ipfs.io/ipfs/' + m['image'].split('//')[1]
+        image_urls[token_id] = image_url
+
+    write_json(f'{os.path.join(os.getcwd())}/json/image_urls/{collection}.txt', image_urls)
+    os.makedirs(f'{os.path.join(os.getcwd())}\\images\\{collection}', exist_ok=True)
+
+    return image_urls
+
+
+def run(collection, n, use_index, rate_limited):
+    global metadata
+
+    contract = conn_infura(contract_addrs[collection], abis[collection])
+    uris, urls = get_uris(collection, contract, n=n, use_index=use_index)
+    # urls = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/urls/{collection}.txt'))
+
+    if rate_limited:
+        fetch_metadata_limited(urls, 7.5 / 20)  # rate limited
+    else:
+        asyncio.get_event_loop().run_until_complete(fetch_metadata(urls))  # asynchronous
+
+    metadata, failed = check_revealed(collection, urls, metadata)  # check if metadata has attribute key
+    # metadata = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata/{collection}.txt'))
+
+    image_urls = get_image_urls(collection, metadata)
+    metadata_clean = strip_metadata(collection, metadata)
+
+    process_collection(collection)
+
+metadata = []
+
+def main():
+    start = time.time()
+    run(collection='ddds', n=5000, use_index=False, rate_limited=False)
+    end = time.time()
+    print(f'total time: {(end-start)/60} minutes')
+    # attempt_fetch_failed(collection='mekaverse')
+
+    # for i in ['doodles']:
+    #     urls = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/urls/{i}.txt'))
+    #     metadata = json.loads(read_json(f'{os.path.join(os.getcwd())}/json/metadata/{i}.txt'))
+    #     metadata, failed = check_revealed(i, urls, metadata)
+
+main()
